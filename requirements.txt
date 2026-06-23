@@ -5,3 +5,4 @@ groq
 plotly
 scikit-learn
 openpyxl
+playwright

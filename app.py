@@ -7,6 +7,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, mean_squared_error
 import os, requests, json
 from groq import Groq
+from playwright.sync_api import sync_playwright
 
 st.set_page_config(page_title="AI & ML Command Center", layout="wide")
 st.title("🧠 AI & ML Command Center")
@@ -16,23 +17,14 @@ tab1, tab2, tab3 = st.tabs(["📊 Data Explorer", "🤖 ML Laboratory", "🕷️
 with tab1:
     st.header("Upload Data & Visualize")
     uploaded_file = st.file_uploader("Upload a CSV or Excel file", type=["csv", "xlsx"])
-    
     if uploaded_file:
-        if uploaded_file.name.endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
-            
+        if uploaded_file.name.endswith(".csv"): df = pd.read_csv(uploaded_file)
+        else: df = pd.read_excel(uploaded_file)
         st.dataframe(df.head(500), use_container_width=True)
-        
         col1, col2 = st.columns(2)
-        with col1:
-            x_axis = st.selectbox("X Axis", df.columns)
-        with col2:
-            y_axis = st.selectbox("Y Axis", df.columns)
-            
+        with col1: x_axis = st.selectbox("X Axis", df.columns)
+        with col2: y_axis = st.selectbox("Y Axis", df.columns)
         chart_type = st.radio("Chart Type", ["Line", "Bar", "Scatter", "Histogram"], horizontal=True)
-        
         if st.button("Generate Chart"):
             if chart_type == "Line": fig = px.line(df, x=x_axis, y=y_axis)
             elif chart_type == "Bar": fig = px.bar(df, x=x_axis, y=y_axis)
@@ -47,52 +39,72 @@ with tab2:
         target = st.selectbox("Select Target Column to Predict", df.columns)
         task = st.selectbox("Task Type", ["Classification (Categories)", "Regression (Numbers)"])
         model_choice = st.selectbox("Select Model", ["Random Forest", "Logistic Regression", "Linear Regression"])
-        
-        if st.button("🚀 Train Model"):
-            # Clean data (drop non-numeric for simplicity)
+        if st.button("Train Model"):
             numeric_df = df.select_dtypes(include=['number']).dropna()
-            if target not in numeric_df.columns:
-                st.error("Target column must be numbers for this demo.")
+            if target not in numeric_df.columns: st.error("Target column must be numbers.")
             else:
                 X = numeric_df.drop(columns=[target])
                 y = numeric_df[target]
                 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
-                
                 if model_choice == "Random Forest": model = RandomForestClassifier()
                 elif model_choice == "Logistic Regression": model = LogisticRegression(max_iter=1000)
                 else: model = LinearRegression()
-                
                 model.fit(X_train, y_train)
                 predictions = model.predict(X_test)
-                
                 if task == "Classification (Categories)":
                     acc = accuracy_score(y_test, predictions)
                     st.success(f"Model Trained! Accuracy: {acc * 100:.2f}%")
                 else:
                     mse = mean_squared_error(y_test, predictions)
                     st.success(f"Model Trained! Mean Squared Error: {mse:.2f}")
-                
                 st.subheader("Predictions vs Actual")
-                result_df = pd.DataFrame({"Actual": y_test, "Predicted": predictions})
-                st.dataframe(result_df.head(), use_container_width=True)
+                st.dataframe(pd.DataFrame({"Actual": y_test, "Predicted": predictions}).head(), use_container_width=True)
 
-# --- TAB 3: AI WEB SCRAPER ---
+# --- TAB 3: AI WEB SCRAPER WITH LOGIN ---
 with tab3:
     if "results" not in st.session_state: st.session_state.results = None
     col1, col2 = st.columns([1, 2])
     with col1:
         st.header("Control Panel")
-        url = st.text_input("Website URL", value="https://example.com")
-        prompt = st.text_area("What to extract?", value="Get all the main paragraphs.")
+        target_url = st.text_input("Target Report URL", value="https://webs.waltonbd.com/1225/cwip_sfg_req_report_details_v2.php")
+        
+        use_login = st.checkbox("Requires Login?")
+        emp_id = ""
+        pwd = ""
+        if use_login:
+            emp_id = st.text_input("Employee ID")
+            pwd = st.text_input("HRMS Password", type="password")
+            
+        prompt = st.text_area("What to extract?", value="Get all table data from this report.")
+        
         if st.button("Scrape & Update", type="primary"):
-            with st.spinner("Agent working..."):
+            with st.spinner("Headless Browser working... Logging in and scraping..."):
                 try:
-                    scrape_url = "https://r.jina.ai/" + url
-                    headers = {'Accept': 'application/json'}
-                    res = requests.get(scrape_url, headers=headers, timeout=15)
-                    text = res.json()['data']['content']
+                    with sync_playwright() as p:
+                        browser = p.chromium.launch(headless=True)
+                        page = browser.new_page()
+                        
+                        if use_login:
+                            page.goto("https://webs.waltonbd.com/1225/")
+                            # Type into the Oracle EBS fields
+                            page.locator('input[type="text"]').first.fill(emp_id)
+                            page.locator('input[type="password"]').first.fill(pwd)
+                            # Click the Login button
+                            page.locator('button:has-text("Login")').click()
+                            page.wait_for_load_state("networkidle")
+                            st.success("Logged in successfully!")
+                        
+                        # Go to the target report
+                        page.goto(target_url)
+                        page.wait_for_load_state("domcontentloaded")
+                        
+                        # Extract text/HTML
+                        text = page.locator("body").inner_text()
+                        browser.close()
+                    
+                    # Send to Groq AI to format
                     client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-                    ai_prompt = f"Extract from text. Request: {prompt}\n\nText:\n{text[:12000]}\n\nRespond ONLY with valid JSON."
+                    ai_prompt = f"Extract from text. Request: {prompt}\n\nText:\n{text[:15000]}\n\nRespond ONLY with valid JSON."
                     response = client.chat.completions.create(model="llama-3.1-8b-instant", messages=[{"role": "user", "content": ai_prompt}], temperature=0.1)
                     try:
                         clean = response.choices[0].message.content
@@ -101,7 +113,9 @@ with tab3:
                         st.session_state.results = json.loads(clean)
                     except: st.session_state.results = {"Data": response.choices[0].message.content}
                 except Exception as e: st.error(e)
+                
     with col2:
         st.header("Live Dashboard View")
-        if st.session_state.results: st.json(st.session_state.results)
+        if st.session_state.results: 
+            st.json(st.session_state.results)
         else: st.info("Click the button on the left to fetch data.")
