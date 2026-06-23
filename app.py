@@ -6,8 +6,8 @@ from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, mean_squared_error
 import os, requests, json
+from bs4 import BeautifulSoup
 from groq import Groq
-from playwright.sync_api import sync_playwright
 
 st.set_page_config(page_title="AI & ML Command Center", layout="wide")
 st.title("🧠 AI & ML Command Center")
@@ -60,7 +60,7 @@ with tab2:
                 st.subheader("Predictions vs Actual")
                 st.dataframe(pd.DataFrame({"Actual": y_test, "Predicted": predictions}).head(), use_container_width=True)
 
-# --- TAB 3: AI WEB SCRAPER WITH LOGIN ---
+# --- TAB 3: AI WEB SCRAPER WITH SMART LOGIN ---
 with tab3:
     if "results" not in st.session_state: st.session_state.results = None
     col1, col2 = st.columns([1, 2])
@@ -78,31 +78,45 @@ with tab3:
         prompt = st.text_area("What to extract?", value="Get all table data from this report.")
         
         if st.button("Scrape & Update", type="primary"):
-            with st.spinner("Headless Browser working... Logging in and scraping..."):
+            with st.spinner("Logging in and extracting data..."):
                 try:
-                    with sync_playwright() as p:
-                        browser = p.chromium.launch(headless=True)
-                        page = browser.new_page()
-                        
-                        if use_login:
-                            page.goto("https://webs.waltonbd.com/1225/")
-                            # Type into the Oracle EBS fields
-                            page.locator('input[type="text"]').first.fill(emp_id)
-                            page.locator('input[type="password"]').first.fill(pwd)
-                            # Click the Login button
-                            page.locator('button:has-text("Login")').click()
-                            page.wait_for_load_state("networkidle")
-                            st.success("Logged in successfully!")
-                        
-                        # Go to the target report
-                        page.goto(target_url)
-                        page.wait_for_load_state("domcontentloaded")
-                        
-                        # Extract text/HTML
-                        text = page.locator("body").inner_text()
-                        browser.close()
+                    session = requests.Session()
+                    headers = {'User-Agent': 'Mozilla/5.0'}
                     
-                    # Send to Groq AI to format
+                    if use_login:
+                        # 1. Get login page to grab hidden security tokens
+                        login_res = session.get("https://webs.waltonbd.com/1225/", headers=headers, timeout=15)
+                        soup = BeautifulSoup(login_res.text, 'html.parser')
+                        form = soup.find('form')
+                        
+                        if not form:
+                            st.error("Could not find login form.")
+                        else:
+                            action_url = form.get('action')
+                            if not action_url.startswith('http'):
+                                action_url = "https://webs.waltonbd.com/1225/" + action_url
+                            
+                            # 2. Collect hidden tokens and fill user/pass
+                            payload = {}
+                            for inp in form.find_all('input'):
+                                name = inp.get('name')
+                                if not name: continue
+                                if inp.get('type') == 'hidden':
+                                    payload[name] = inp.get('value', '')
+                                elif inp.get('type') == 'text':
+                                    payload[name] = emp_id
+                                elif inp.get('type') == 'password':
+                                    payload[name] = pwd
+                                    
+                            # 3. Submit Login
+                            session.post(action_url, data=payload, headers=headers)
+                            st.success("Logged in securely!")
+                    
+                    # 4. Fetch the target report
+                    res = session.get(target_url, headers=headers, timeout=15)
+                    text = res.text
+                    
+                    # 5. Send to AI to format
                     client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
                     ai_prompt = f"Extract from text. Request: {prompt}\n\nText:\n{text[:15000]}\n\nRespond ONLY with valid JSON."
                     response = client.chat.completions.create(model="llama-3.1-8b-instant", messages=[{"role": "user", "content": ai_prompt}], temperature=0.1)
